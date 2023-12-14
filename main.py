@@ -25,18 +25,15 @@ class CustomJSONEncoder(JSONEncoder):
 app = Flask(__name__)
 jwt = JWTManager(app)
 
-# Use the 'instance_relative_config' parameter to make the path relative to the instance folder
 db_folder = os.path.join(app.instance_path, 'db')
 os.makedirs(db_folder, exist_ok=True)
 
-# Specify the database file path
 db_path = os.path.join(db_folder, 'pizza.db')
 
 app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{db_path}'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.config['JWT_SECRET_KEY'] = 'your-secret-key'  # Change this to a secure secret key
+app.config['JWT_SECRET_KEY'] = 'Pizza123'
 
-# Set the custom JSON encoder for the app
 app.json_encoder = CustomJSONEncoder
 
 api = Api(app)
@@ -147,9 +144,27 @@ class PostMessage(Resource):
 
 class BrowseMessages(Resource):
     @jwt_required
-    def get(self, topic_name):
+    def get(self, topic_name, post_id=None):
         # Get the current user from the JWT token
         current_user = get_jwt_identity()
+
+        # Check if a specific post ID is provided
+        if post_id is not None:
+            post = Post.query.filter_by(id=post_id, topic=topic_name, status='Live').first()
+            if not post:
+                return {'message': 'Post not found'}, 404
+
+            return {
+                'id': post.id,
+                'title': post.title,
+                'topic': post.topic,
+                'timestamp': post.timestamp.strftime('%Y-%m-%dT%H:%M:%S'),
+                'expiration_time': post.expiration_time.strftime('%Y-%m-%dT%H:%M:%S'),
+                'owner_name': post.owner_name,
+                'body': post.body,  # Include the post body in the response
+                'likes': post.likes,
+                'dislikes': post.dislikes
+            }
 
         # Retrieve messages related to the specified topic
         messages = Post.query.filter_by(topic=topic_name, status='Live').all()
@@ -160,10 +175,10 @@ class BrowseMessages(Resource):
         # Iterate through the messages and create a response
         for message in messages:
             result.append({
+                'id': message.id,
                 'title': message.title,
                 'topic': message.topic,
                 'timestamp': message.timestamp.strftime('%Y-%m-%dT%H:%M:%S'),
-                'body': message.body,
                 'expiration_time': message.expiration_time.strftime('%Y-%m-%dT%H:%M:%S'),
                 'owner_name': message.owner_name,
                 'likes': message.likes,
@@ -173,7 +188,12 @@ class BrowseMessages(Resource):
         return {'messages': result}
 
 
-# ... (your existing code)
+class Comment(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_name = db.Column(db.String(80), nullable=False)
+    text = db.Column(db.Text, nullable=False)
+    post_id = db.Column(db.Integer, db.ForeignKey('post.id'), nullable=False)
+
 
 class UserInteractions(Resource):
     @jwt_required
@@ -205,14 +225,80 @@ class UserInteractions(Resource):
         elif interaction_type == 'dislike':
             post.dislikes += 1
         elif interaction_type == 'comment':
-            # You can implement your logic for handling comments here
-            # For example, you might want to save the comment to a separate Comment model
-            pass
+            comment_parser = reqparse.RequestParser()
+            comment_parser.add_argument('comment_text', help='Comment text is required', required=True)
+
+            comment_data = comment_parser.parse_args()
+            comment_text = comment_data['comment_text']
+
+            # Save the comment to the Comment model
+            new_comment = Comment(
+                user_name=current_user,
+                text=comment_text,
+                post_id=post_id
+            )
+            db.session.add(new_comment)
 
         # Save the changes to the database
         db.session.commit()
 
         return {'message': f'{interaction_type.capitalize()} added successfully'}
+
+
+class ViewComments(Resource):
+    @jwt_required
+    def get(self, post_id):
+        # Check if the post exists
+        post = Post.query.filter_by(id=post_id, status='Live').first()
+        if not post:
+            return {'message': 'Post not found'}, 404
+
+        # Retrieve comments for the post
+        comments = Comment.query.filter_by(post_id=post_id).all()
+
+        # Create a list to store the comments
+        result = []
+
+        # Iterate through the comments and create a response
+        for comment in comments:
+            result.append({
+                'id': comment.id,
+                'user_name': comment.user_name,
+                'text': comment.text,
+                'post_id': comment.post_id
+            })
+
+        return {'comments': result}
+
+
+class PostComment(Resource):
+    @jwt_required
+    def post(self, post_id):
+        # Get the current user from the JWT token
+        current_user = get_jwt_identity()
+
+        # Parse the request data for posting comments
+        comment_parser = reqparse.RequestParser()
+        comment_parser.add_argument('comment_text', help='Comment text is required', required=True)
+
+        comment_data = comment_parser.parse_args()
+        comment_text = comment_data['comment_text']
+
+        # Check if the post exists
+        post = Post.query.get(post_id)
+        if not post:
+            return {'message': 'Post not found'}, 404
+
+        # Save the comment to the Comment model
+        new_comment = Comment(
+            user_name=current_user,
+            text=comment_text,
+            post_id=post_id
+        )
+        db.session.add(new_comment)
+        db.session.commit()
+
+        return {'message': 'Comment added successfully'}
 
 
 if __name__ == '__main__':
@@ -222,6 +308,8 @@ if __name__ == '__main__':
     api.add_resource(UserRegistration, '/register')
     api.add_resource(UserLogin, '/login')
     api.add_resource(PostMessage, '/post')
-    api.add_resource(BrowseMessages, '/topic/<string:topic_name>')
+    api.add_resource(BrowseMessages, '/topic/<string:topic_name>', '/topic/<string:topic_name>/<int:post_id>')
     api.add_resource(UserInteractions, '/interaction/<int:post_id>')
+    api.add_resource(ViewComments, '/comments/<int:post_id>')
+    api.add_resource(PostComment, '/comment/<int:post_id>')
     app.run(debug=True)
